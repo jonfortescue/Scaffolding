@@ -8,6 +8,46 @@ namespace Microsoft.DotNet.Scaffolding.Shared.Project
 {
     internal static class ProjectModifierHelper
     {
+        /// <summary>
+        /// Check if Startup.cs or similar file exists.
+        /// </summary>
+        /// <returns>true if Startup.cs does not exist, false if it does exist.</returns>
+        internal static async Task<bool> IsMinimalApp(Workspace workspace)
+        {
+            var modelTypesLocator = new ModelTypesLocator(workspace);
+            //find Startup if named Startup.
+            var startupType = modelTypesLocator.GetType("Startup").FirstOrDefault();
+            if (startupType == null)
+            {
+                //if changed the name in Program.cs, get the class name and check.
+                var programDocument = modelTypesLocator.GetAllDocuments().Where(d => d.Name.EndsWith("Program.cs")).FirstOrDefault();
+                var startupClassName = await GetStartupClassName(programDocument);
+                startupType = modelTypesLocator.GetType(startupClassName).FirstOrDefault();
+            }
+            return startupType == null;
+        }
+
+        internal static async Task<bool> IsMinimalApp(CodeAnalysis.Project project)
+        {
+            if (project != null)
+            {
+                var startupDocument = project.Documents.Where(d => d.Name.EndsWith("Startup.cs")).FirstOrDefault();
+                if (startupDocument == null)
+                {
+                    //if changed the name in Program.cs, get the class name and check.
+                    var programDocument = project.Documents.Where(d => d.Name.EndsWith("Program.cs")).FirstOrDefault();
+                    var startupClassName = await GetStartupClassName(programDocument);
+                    if (!string.IsNullOrEmpty(startupClassName))
+                    {
+                        startupDocument = project.Documents.Where(d => d.Name.EndsWith($"{startupClassName}.cs")).FirstOrDefault();
+                    }
+                   
+                }
+                return startupDocument == null;
+            }
+            return false;
+        }
+
         //Get Startup class name from CreateHostBuilder in Program.cs. If Program.cs is not being used, method
         //will bail out.
         internal static async Task<string> GetStartupClass(string projectPath, CodeAnalysis.Project project)

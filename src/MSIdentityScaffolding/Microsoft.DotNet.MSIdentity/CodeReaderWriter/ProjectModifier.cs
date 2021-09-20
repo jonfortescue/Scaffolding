@@ -14,6 +14,7 @@ using Microsoft.DotNet.MSIdentity.Properties;
 using Microsoft.DotNet.MSIdentity.Shared;
 using Microsoft.DotNet.MSIdentity.Tool;
 using Microsoft.DotNet.Scaffolding.Shared.CodeModifier;
+using Microsoft.DotNet.Scaffolding.Shared.CodeModifier.CodeChange;
 using Microsoft.DotNet.Scaffolding.Shared.Project;
 
 namespace Microsoft.DotNet.MSIdentity.CodeReaderWriter
@@ -46,14 +47,17 @@ namespace Microsoft.DotNet.MSIdentity.CodeReaderWriter
                 if (codeModifierConfig != null &&
                     codeModifierConfig.Files != null)
                 {
+                    System.Diagnostics.Debugger.Launch();
                     //Initialize CodeAnalysis.Project wrapper
                     CodeAnalysis.Project project = await CodeAnalysisHelper.LoadCodeAnalysisProjectAsync(_toolOptions.ProjectFilePath);
+
+                    //is minimal project
+                    var isMinimalApp = await ProjectModifierHelper.IsMinimalApp(project);
 
                     //Go through all the files, make changes using DocumentBuilder.
                     foreach (var file in codeModifierConfig.Files)
                     {
                         var fileName = file.FileName;
-                        string className = ProjectModifierHelper.GetClassName(fileName);
 
                         //if the file we are modifying is Startup.cs, use Program.cs to find the correct file to edit.
                         if (!string.IsNullOrEmpty(file.FileName) && file.FileName.Equals("Startup.cs", StringComparison.OrdinalIgnoreCase))
@@ -61,52 +65,17 @@ namespace Microsoft.DotNet.MSIdentity.CodeReaderWriter
                             fileName = await ProjectModifierHelper.GetStartupClass(_toolOptions.ProjectPath, project);
                         }
 
-                        if (!string.IsNullOrEmpty(fileName))
+                        if (!string.IsNullOrEmpty(fileName) && !fileName.Equals("Program.cs"))
                         {
-                            string? filePath = Directory.EnumerateFiles(_toolOptions.ProjectPath, fileName, SearchOption.AllDirectories).FirstOrDefault();
-                            //get the file document to get the document root for editing.
-                            
-                            if (!string.IsNullOrEmpty(filePath))
+                            await ModifyCsFile(fileName, file, project);
+                        }
+                        // if file is Program.cs
+                        else if (!string.IsNullOrEmpty(fileName) && fileName.Equals("Program.cs"))
+                        {
+                            //if non a minimal app, don't modify Program.cs file (as we made changes to the Startup.cs file).
+                            if (isMinimalApp)
                             {
-                                var fileDoc = project.Documents.Where(d => d.Name.Equals(filePath)).FirstOrDefault();
-                                DocumentEditor documentEditor = await DocumentEditor.CreateAsync(fileDoc);
-                                DocumentBuilder documentBuilder = new DocumentBuilder(documentEditor, file, _consoleLogger);
-                                var docRoot = documentEditor.OriginalRoot as CompilationUnitSyntax;
-                                //adding usings
-                                var newRoot = documentBuilder.AddUsings();
-                                var namespaceNode = newRoot?.Members.OfType<NamespaceDeclarationSyntax>()?.FirstOrDefault();
-
-                                //get classNode. All class changes are done on the ClassDeclarationSyntax and then that node is replaced using documentEditor.
-                                var classNode = namespaceNode?
-                                    .DescendantNodes()?
-                                    .Where(node =>
-                                        node is ClassDeclarationSyntax cds &&
-                                        cds.Identifier.ValueText.Contains(className))
-                                    .FirstOrDefault();
-
-                                if (classNode is ClassDeclarationSyntax classDeclarationSyntax)
-                                {
-                                    var modifiedClassDeclarationSyntax = classDeclarationSyntax;
-                                   
-                                    //add class properties
-                                    modifiedClassDeclarationSyntax = documentBuilder.AddProperties(modifiedClassDeclarationSyntax);
-                                    //add class attributes
-                                    modifiedClassDeclarationSyntax = documentBuilder.AddClassAttributes(modifiedClassDeclarationSyntax);
-
-                                    //add code snippets/changes.
-                                    if (file.Methods != null && file.Methods.Any())
-                                    {
-                                        modifiedClassDeclarationSyntax = documentBuilder.AddCodeSnippets(file, modifiedClassDeclarationSyntax); ;
-                                    }
-                                    //replace class node with all the updates.
-                                    documentEditor.ReplaceNode(classDeclarationSyntax, modifiedClassDeclarationSyntax);
-                                }
-
-                                if (docRoot != null && newRoot != null)
-                                {
-                                    documentEditor.ReplaceNode(docRoot, newRoot);
-                                }
-                                await documentBuilder.WriteToClassFileAsync(fileName, filePath);
+                                await ModifyProgramCs(file, project);
                             }
                         }
                     }
@@ -114,6 +83,89 @@ namespace Microsoft.DotNet.MSIdentity.CodeReaderWriter
             }
         }
 
+        internal async Task ModifyProgramCs(CodeFile programCsFile, CodeAnalysis.Project project)
+        {
+            string? programCsFilePath = Directory.EnumerateFiles(_toolOptions.ProjectPath, "Program.cs", SearchOption.AllDirectories).FirstOrDefault();
+            if (!string.IsNullOrEmpty(programCsFilePath))
+            {
+                var programDocument = project.Documents.Where(d => d.Name.Equals(programCsFilePath)).FirstOrDefault();
+                DocumentEditor documentEditor = await DocumentEditor.CreateAsync(programDocument);
+                DocumentBuilder documentBuilder = new DocumentBuilder(documentEditor, programCsFile, _consoleLogger);
+                var docRoot = documentEditor.OriginalRoot as CompilationUnitSyntax;
+
+                var newRoot = documentBuilder.AddUsings();
+                //add code snippets/changes.
+                if (programCsFile.Methods != null && programCsFile.Methods.Any())
+                {
+                    var globalChanges = programCsFile.Methods.Where(x => x.Key == "Global").First().Value;
+                    foreach (var change in globalChanges.CodeChanges)
+                    {
+                        //change.Block = EditIdentityStrings(change.Block, dbContextClassName, identityUserClassName, useSqlite);
+                        newRoot = DocumentBuilder.AddGlobalStatements(change, newRoot);
+                    }
+                }
+                if (docRoot != null && programDocument != null)
+                {
+                    //replace root node with all the updates.
+                    documentEditor.ReplaceNode(docRoot, newRoot);
+                    //write to Program.cs file
+                    await documentBuilder.WriteToClassFileAsync(programDocument.Name, programDocument.FilePath);
+                }
+                
+               
+                // add app.UseMigrationsEndPoint(); in else of IsDevelopment()
+            }
+        }
+
+        internal async Task ModifyCsFile(string fileName, CodeFile file, CodeAnalysis.Project project)
+        {
+            string className = ProjectModifierHelper.GetClassName(fileName);
+            string? filePath = Directory.EnumerateFiles(_toolOptions.ProjectPath, fileName, SearchOption.AllDirectories).FirstOrDefault();
+            //get the file document to get the document root for editing.
+
+            if (!string.IsNullOrEmpty(filePath))
+            {
+                var fileDoc = project.Documents.Where(d => d.Name.Equals(filePath)).FirstOrDefault();
+                DocumentEditor documentEditor = await DocumentEditor.CreateAsync(fileDoc);
+                DocumentBuilder documentBuilder = new DocumentBuilder(documentEditor, file, _consoleLogger);
+                var docRoot = documentEditor.OriginalRoot as CompilationUnitSyntax;
+                //adding usings
+                var newRoot = documentBuilder.AddUsings();
+                var namespaceNode = newRoot?.Members.OfType<NamespaceDeclarationSyntax>()?.FirstOrDefault();
+
+                //get classNode. All class changes are done on the ClassDeclarationSyntax and then that node is replaced using documentEditor.
+                var classNode = namespaceNode?
+                    .DescendantNodes()?
+                    .Where(node =>
+                        node is ClassDeclarationSyntax cds &&
+                        cds.Identifier.ValueText.Contains(className))
+                    .FirstOrDefault();
+
+                if (classNode is ClassDeclarationSyntax classDeclarationSyntax)
+                {
+                    var modifiedClassDeclarationSyntax = classDeclarationSyntax;
+
+                    //add class properties
+                    modifiedClassDeclarationSyntax = documentBuilder.AddProperties(modifiedClassDeclarationSyntax);
+                    //add class attributes
+                    modifiedClassDeclarationSyntax = documentBuilder.AddClassAttributes(modifiedClassDeclarationSyntax);
+
+                    //add code snippets/changes.
+                    if (file.Methods != null && file.Methods.Any())
+                    {
+                        modifiedClassDeclarationSyntax = documentBuilder.AddCodeSnippets(file, modifiedClassDeclarationSyntax); ;
+                    }
+                    //replace class node with all the updates.
+                    documentEditor.ReplaceNode(classDeclarationSyntax, modifiedClassDeclarationSyntax);
+                }
+
+                if (docRoot != null && newRoot != null)
+                {
+                    documentEditor.ReplaceNode(docRoot, newRoot);
+                }
+                await documentBuilder.WriteToClassFileAsync(fileName, filePath);
+            }
+        }
         private CodeModifierConfig? GetCodeModifierConfig()
         {
             List<CodeModifierConfig> codeModifierConfigs = new List<CodeModifierConfig>();

@@ -188,7 +188,11 @@ namespace Microsoft.DotNet.Scaffolding.Shared.CodeModifier
                 //insert global statement after particular statement
                 if (!string.IsNullOrEmpty(change.InsertAfter) || change.InsertBefore != null)
                 {
-                    var insertAfterStatement = newRoot.Members.Where(st => st.ToString().Contains(change.InsertAfter)).FirstOrDefault();
+                    MemberDeclarationSyntax insertAfterStatement = null;
+                    if (!string.IsNullOrEmpty(change.InsertAfter))
+                    {
+                        insertAfterStatement = newRoot.Members.Where(st => st.ToString().Contains(change.InsertAfter)).FirstOrDefault();
+                    }
                     if (insertAfterStatement != null && insertAfterStatement is GlobalStatementSyntax insertAfterGlobalStatment)
                     {
                         newRoot = newRoot.InsertNodesAfter(insertAfterGlobalStatment, new List<SyntaxNode> { globalStatement });
@@ -207,7 +211,7 @@ namespace Microsoft.DotNet.Scaffolding.Shared.CodeModifier
                             }
                         }
                     }
-            }
+                }
                 //insert global statement at the top of the file
                 else if (change.Append)
                 {
@@ -219,7 +223,6 @@ namespace Microsoft.DotNet.Scaffolding.Shared.CodeModifier
                     newRoot = newRoot.WithMembers(newRoot.Members.Add(globalStatement));
                 }
             }
-           
             return newRoot;
         }
 
